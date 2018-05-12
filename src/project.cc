@@ -12,6 +12,14 @@
 #include "utils.h"
 #include "working_files.h"
 
+#include <clang/Driver/Options.h>
+#include <llvm/ADT/ArrayRef.h>
+#include <llvm/Option/ArgList.h>
+#include <llvm/Option/OptTable.h>
+using namespace clang;
+using namespace llvm;
+using namespace llvm::opt;
+
 #include <clang-c/CXCompilationDatabase.h>
 #include <doctest/doctest.h>
 #include <rapidjson/writer.h>
@@ -59,51 +67,6 @@ enum OptionClass {
   Separate,
 };
 
-enum {
-  // Arguments which are followed by a potentially relative path. We need to
-  // make all relative paths absolute, otherwise libclang will not resolve them.
-  Absolute = 1,
-  Blacklist = 2,
-  // #include "" completion.
-  Quoted = 4,
-  // #include <> completion.
-  System = 8,
-};
-
-enum {
-  resource_dir = 1,
-  working_directory,
-  last_special,
-};
-
-struct Option {
-  std::string_view name;
-  OptionClass cls;
-  int8_t trans;
-  int id;
-} g_options[] = {
-    {"F", JoinOrSep},
-    {"I", JoinOrSep, Quoted | System},
-    {"MF", JoinOrSep},
-    {"MQ", JoinOrSep},
-    {"MT", JoinOrSep},
-    {"Xclang", Separate},
-    {"cxx-isystem", JoinOrSep, System},
-    {"idirafter", JoinOrSep},
-    {"iframework", JoinOrSep},
-    {"imacros", JoinOrSep},
-    {"include", EqOrJoinOrSep, Absolute},
-    {"include-pch", Separate, Absolute},
-    {"iquote", JoinOrSep, Quoted},
-    {"isysroot", JoinOrSep},
-    {"isystem", JoinOrSep, System},
-    {"isystem-after", JoinOrSep, System},
-    {"mllvm", Separate},
-    {"resource-dir", EqOrSep, Absolute, resource_dir},
-    {"working-directory", EqOrJoinOrSep, Absolute, working_directory},
-    {"o", JoinOrSep},
-};
-
 Project::Entry GetCompilationEntryFromCompileCommandEntry(
     ProjectConfig* config,
     const CompileCommandsEntry& entry) {
@@ -149,94 +112,44 @@ Project::Entry GetCompilationEntryFromCompileCommandEntry(
   // Compiler driver.
   result.args.push_back(args[0]);
 
-  bool has_ids[last_special] = {};
+  std::unique_ptr<OptTable> Opts = driver::createDriverOptTable();
+  unsigned MissingArgIndex, MissingArgCount;
+  std::vector<const char*> cargs;
+  for (auto& arg : args)
+    cargs.push_back(arg.c_str());
+  InputArgList Args =
+      Opts->ParseArgs(makeArrayRef(cargs), MissingArgIndex, MissingArgCount,
+                      driver::options::CC1Option);
+
+  using namespace clang::driver::options;
+  for (const auto* A :
+       Args.filtered(OPT_I, OPT_c_isystem, OPT_cxx_isystem, OPT_isystem))
+    config->angle_dirs.insert(A->getValue());
+  for (const auto* A : Args.filtered(OPT_I, OPT_iquote))
+    config->quote_dirs.insert(A->getValue());
+
   result.args.reserve(args.size() + config->extra_flags.size());
   for (size_t i = 1; i < args.size(); i++) {
-    if (args[i][0] == '-') {
-      std::string_view arg = std::string_view(args[i]).substr(1);
-      for (int j = std::extent_v<decltype(g_options)>; j--; ) {
-        const Option& opt = g_options[j];
-        std::string_view val;
-        if (StartsWith(arg, opt.name)) {
-          switch (opt.cls) {
-          case EqOrSep:
-            if (arg.size() == opt.name.size()) {
-              if (++i == args.size())
-                goto next;
-              val = args[i];
-            } else {
-              val = arg.substr(opt.name.size());
-              if (val.size() && val[0] == '=')
-                val.remove_prefix(1);
-              else
-                goto next;
-            }
-            break;
-          case EqOrJoinOrSep:
-          case JoinOrSep:
-            if (arg.size() == opt.name.size()) {
-              if (++i == args.size())
-                goto next;
-              val = args[i];
-            } else {
-              val = arg.substr(opt.name.size());
-              if (opt.cls == EqOrJoinOrSep && val.size() && val[0] == '=')
-                val.remove_prefix(1);
-            }
-            break;
-          case Separate:
-            if (++i == args.size())
-              goto next;
-            val = args[i];
-            break;
-          }
-          if (opt.trans & Absolute) {
-            args[i] = entry.ResolveIfRelative(val);
-            val = args[i];
-          }
-          if (opt.trans & (Quoted | System)) {
-            std::string abs_path = entry.ResolveIfRelative(val);
-            if (opt.trans & Quoted)
-              config->quote_dirs.insert(abs_path);
-            if (opt.trans & System)
-              config->angle_dirs.insert(abs_path);
-          }
-          result.args.push_back(std::string("-") + std::string(opt.name));
-          result.args.emplace_back(val);
-          has_ids[opt.id] = true;
-          goto next;
-        }
-      }
-      result.args.push_back(args[i]);
-    } else {
-      if (clang_cl) {
-        if (args[i] == "/I") {
-          result.args.push_back(args[i]);
-          if (++i == args.size())
-            goto next;
-          std::string abs_path = entry.ResolveIfRelative(args[i]);
-          config->quote_dirs.insert(abs_path);
-          config->angle_dirs.insert(abs_path);
-          result.args.push_back(abs_path);
-        }
-      }
+    if (args[i][0] != '-') {
       // This is most likely the file path we will be passing to clang. The
       // path needs to be absolute, otherwise clang_codeCompleteAt is extremely
       // slow. See
       // https://github.com/cquery-project/cquery/commit/af63df09d57d765ce12d40007bf56302a0446678.
-      if (EndsWith(args[i], base_name))
+      if (EndsWith(args[i], base_name)) {
         result.args.push_back(entry.ResolveIfRelative(args[i]));
+        continue;
+      }
     }
-    next:;
+    result.args.push_back(args[i]);
   }
 
   // We don't do any special processing on user-given extra flags.
   for (const auto& flag : config->extra_flags)
     result.args.push_back(flag);
 
-  if (!has_ids[resource_dir])
+  if (!Args.hasArg(OPT_resource_dir))
     result.args.push_back("-resource-dir=" + g_config->clang.resourceDir);
-  if (!has_ids[working_directory])
+  if (!Args.hasArg(OPT_working_directory))
     result.args.push_back("-working-directory=" + entry.directory.string());
 
   // There could be a clang version mismatch between what the project uses and

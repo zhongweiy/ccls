@@ -3,7 +3,10 @@
 
 #include "utils.h"
 
-#include "loguru.hpp"
+#include <llvm/ADT/Twine.h>
+#include <llvm/Support/Threading.h>
+
+#include <loguru.hpp>
 
 #include <pthread.h>
 #if defined(__FreeBSD__)
@@ -157,13 +160,7 @@ std::string NormalizePath(const std::string& path) {
 
 void SetThreadName(const std::string& thread_name) {
   loguru::set_thread_name(thread_name.c_str());
-#if defined(__APPLE__)
-  pthread_setname_np(thread_name.c_str());
-#elif defined(__FreeBSD__) || defined(__OpenBSD__)
-  pthread_set_name_np(pthread_self(), thread_name.c_str());
-#elif defined(__linux__)
-  pthread_setname_np(pthread_self(), thread_name.c_str());
-#endif
+  llvm::set_thread_name(thread_name);
 }
 
 void FreeUnusedMemory() {
