@@ -7,9 +7,9 @@
 #include <clang-c/Index.h>
 #include <clang/Basic/FileManager.h>
 
-#include <functional>
 #include <map>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 struct IndexFile;

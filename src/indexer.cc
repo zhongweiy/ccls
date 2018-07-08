@@ -806,8 +806,10 @@ public:
   }
   void MacroUndefined(const Token &Tok, const MacroDefinition &MD,
                       const MacroDirective *UD) override {
-    SourceLocation L = UD->getLocation();
-    MacroExpands(Tok, MD, {L, L}, nullptr);
+    if (UD) {
+      SourceLocation L = UD->getLocation();
+      MacroExpands(Tok, MD, {L, L}, nullptr);
+    }
   }
   void SourceRangeSkipped(SourceRange Range, SourceLocation EndifLoc) override {
     llvm::sys::fs::UniqueID UniqueID;
